@@ -1,0 +1,6 @@
+{
+  "name": "VYORA",
+  "description": "Aplikasi streaming musik premium bergaya Glassmorphism dengan penemuan musik Indonesia dan dukungan YouTube Music InnerTube & Media3 ExoPlayer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
