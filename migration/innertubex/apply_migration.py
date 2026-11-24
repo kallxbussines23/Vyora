@@ -60,31 +60,20 @@ def main() -> None:
         )
     settings_file.write_text(settings, encoding="utf-8")
 
-    app_file = root / "app/src/main/java/com/vyorasound/app/VyoraApplication.kt"
-    app = app_file.read_text(encoding="utf-8")
-    app = replace_once(
-        app,
-        "import com.vyorasound.app.repository.YtDlpStreamResolver",
-        "import com.vyorasound.app.repository.InnerTubeXStreamResolver",
-        "resolver import",
-    )
-    app = replace_once(
-        app,
-        """val ytDlpStreamResolver: YtDlpStreamResolver by lazy {
-        YtDlpStreamResolver(application.applicationContext, poTokenService)
-    }""",
-        """val innerTubeXStreamResolver: InnerTubeXStreamResolver by lazy {
-        InnerTubeXStreamResolver(application.applicationContext, poTokenService)
-    }""",
-        "resolver dependency",
-    )
-    app = replace_once(
-        app,
-        "ytDlpStreamResolver = ytDlpStreamResolver",
-        "ytDlpStreamResolver = innerTubeXStreamResolver",
-        "repository resolver injection",
-    )
-    app_file.write_text(app, encoding="utf-8")
+    # Source snapshots vary slightly in import order and whitespace. Rename the
+    # old resolver symbol wherever it is referenced instead of relying on one
+    # exact import block.
+    touched = []
+    for kotlin_file in root.rglob("*.kt"):
+        source = kotlin_file.read_text(encoding="utf-8")
+        if "YtDlpStreamResolver" in source:
+            kotlin_file.write_text(
+                source.replace("YtDlpStreamResolver", "InnerTubeXStreamResolver"),
+                encoding="utf-8",
+            )
+            touched.append(str(kotlin_file.relative_to(root)))
+    if not touched:
+        raise SystemExit("Migration stopped: no Kotlin reference to YtDlpStreamResolver was found")
 
     old_resolver = root / "app/src/main/java/com/vyorasound/app/repository/YtDlpStreamResolver.kt"
     old_resolver.write_text(
@@ -104,6 +93,7 @@ fun interface AudioStreamResolver {
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.resolver_source, destination)
     print("InnerTubeX migration applied to " + str(root))
+    print("Updated Kotlin references: " + ", ".join(touched))
 
 
 if __name__ == "__main__":
