@@ -1,0 +1,70 @@
+name: VYORA Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "migration/innertubex/**"
+      - ".github/workflows/build-apk.yml"
+      - "nexa-music-nov-21-2026-10-08-24-pm.zip"
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_COMPILE_SDK: "36"
+  ANDROID_BUILD_TOOLS: "36.0.0"
+
+jobs:
+  build:
+    name: Migrate InnerTubeX and build debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout VYORA source archive and migration patch
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Extract latest uploaded VYORA source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vyora-source"
+          python3 -m zipfile -e "$GITHUB_WORKSPACE/nexa-music-nov-21-2026-10-08-24-pm.zip" "$RUNNER_TEMP/vyora-source"
+          PROJECT_ROOT="$(find "$RUNNER_TEMP/vyora-source" -type f -path '*/app/build.gradle.kts' -print -quit | xargs -r dirname | xargs -r dirname)"
+          test -n "$PROJECT_ROOT"
+          echo "VYORA_PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+
+      - name: Apply InnerTubeX migration
+        run: |
+          python3 migration/innertubex/apply_migration.py \
+            --source-root "$VYORA_PROJECT_ROOT" \
+            --resolver-source "$GITHUB_WORKSPACE/migration/innertubex/InnerTubeXStreamResolver.kt"
+
+      - name: Build debug APK
+        working-directory: ${{ env.VYORA_PROJECT_ROOT }}
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VYORA-debug-apk-innertubex
+          path: ${{ env.VYORA_PROJECT_ROOT }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
