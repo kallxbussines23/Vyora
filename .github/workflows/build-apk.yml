@@ -64,6 +64,22 @@ jobs:
           test -n "$PROJECT_ROOT"
           echo "VYORA_PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
+      - name: Package current playback source modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          SNAPSHOT="$RUNNER_TEMP/vyora-playback-source"
+          mkdir -p "$SNAPSHOT"
+          cp "$VYORA_PROJECT_ROOT/app/build.gradle.kts" "$SNAPSHOT/app-build.gradle.kts"
+          cp "$VYORA_PROJECT_ROOT/settings.gradle.kts" "$SNAPSHOT/settings.gradle.kts"
+          cp "$VYORA_PROJECT_ROOT/app/src/main/java/com/vyorasound/app/VyoraApplication.kt" "$SNAPSHOT/"
+          cp "$VYORA_PROJECT_ROOT/app/src/main/java/com/vyorasound/app/repository/InnerTubeMusicRepository.kt" "$SNAPSHOT/"
+          cp "$VYORA_PROJECT_ROOT/app/src/main/java/com/vyorasound/app/network/InnerTubeClientConfig.kt" "$SNAPSHOT/"
+          cp "$VYORA_PROJECT_ROOT/app/src/main/java/com/vyorasound/app/network/InnerTubeApiService.kt" "$SNAPSHOT/"
+          cp "$VYORA_PROJECT_ROOT/app/src/main/java/com/vyorasound/app/network/NetworkModule.kt" "$SNAPSHOT/"
+          cp "$VYORA_PROJECT_ROOT/app/src/main/java/com/vyorasound/app/domain/model/MusicModels.kt" "$SNAPSHOT/"
+          (cd "$SNAPSHOT" && zip -q -r "$RUNNER_TEMP/vyora-playback-source.zip" .)
+
       - name: Inspect latest source resolver layout
         shell: bash
         run: |
@@ -107,5 +123,14 @@ jobs:
         with:
           name: VYORA-source-inspection
           path: ${{ runner.temp }}/vyora-source-inspection.txt
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Upload playback source modules
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VYORA-playback-source
+          path: ${{ runner.temp }}/vyora-playback-source.zip
           if-no-files-found: warn
           retention-days: 3
