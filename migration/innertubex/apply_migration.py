@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Apply VYORA's InnerTubeX playback patch to the checked-in source archive."""
 from __future__ import annotations
-
 import argparse
 import re
 import shutil
@@ -60,35 +59,33 @@ def main() -> None:
         )
     settings_file.write_text(settings, encoding="utf-8")
 
-    # Source snapshots vary slightly in import order and whitespace. Rename the
-    # old resolver symbol wherever it is referenced instead of relying on one
-    # exact import block.
+    kotlin_files = list(root.rglob("*.kt"))
     touched = []
-    for kotlin_file in root.rglob("*.kt"):
+    for kotlin_file in kotlin_files:
         source = kotlin_file.read_text(encoding="utf-8")
         if "YtDlpStreamResolver" in source:
-            kotlin_file.write_text(
-                source.replace("YtDlpStreamResolver", "InnerTubeXStreamResolver"),
-                encoding="utf-8",
-            )
+            kotlin_file.write_text(source.replace("YtDlpStreamResolver", "InnerTubeXStreamResolver"), encoding="utf-8")
             touched.append(str(kotlin_file.relative_to(root)))
+
     if not touched:
-        raise SystemExit("Migration stopped: no Kotlin reference to YtDlpStreamResolver was found")
+        print("No YtDlpStreamResolver symbol found. Kotlin source inventory:")
+        for kotlin_file in kotlin_files:
+            print("KOTLIN_FILE " + str(kotlin_file.relative_to(root)))
+            for number, line in enumerate(kotlin_file.read_text(encoding="utf-8").splitlines(), 1):
+                if re.search(r"yt.?dlp|youtube.?dl|stream.?resolv|playbackstream|audio.?resolver", line, re.I):
+                    print("MATCH " + str(kotlin_file.relative_to(root)) + ":" + str(number) + ": " + line.strip()[:240])
+        raise SystemExit("Migration stopped: source resolver architecture differs from expected VYORA snapshot")
 
     old_resolver = root / "app/src/main/java/com/vyorasound/app/repository/YtDlpStreamResolver.kt"
     old_resolver.write_text(
         """package com.vyorasound.app.repository
 
 fun interface AudioStreamResolver {
-    suspend fun resolve(
-        videoId: String,
-        visitorData: String,
-    ): com.vyorasound.app.domain.model.PlaybackStream
+    suspend fun resolve(videoId: String, visitorData: String): com.vyorasound.app.domain.model.PlaybackStream
 }
 """,
         encoding="utf-8",
     )
-
     destination = root / "app/src/main/java/com/vyorasound/app/repository/InnerTubeXStreamResolver.kt"
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.resolver_source, destination)
