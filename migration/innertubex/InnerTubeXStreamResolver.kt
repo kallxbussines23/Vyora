@@ -1,135 +1,90 @@
 package com.vyorasound.app.repository
 
-import android.content.Context
-import com.metrolist.innertube.InnerTube
-import com.metrolist.innertubex.InnerTubeLogger
+import com.metrolist.innertubex.InnerTube
 import com.metrolist.innertubex.cipher.PlayerConfigRepository
 import com.metrolist.innertubex.cipher.RemotePlayerConfigStore
 import com.metrolist.innertubex.cipher.YouTubeCipherService
 import com.metrolist.innertubex.extraction.AudioQuality
 import com.metrolist.innertubex.extraction.ContentHints
 import com.metrolist.innertubex.extraction.InnerTubeExtractor
-import com.metrolist.innertubex.extraction.PoTokenResult
-import com.metrolist.innertubex.extraction.TokenProvider
-import com.metrolist.innertubex.extraction.TokenProviderCapabilities
 import com.metrolist.innertubex.extraction.YtConfigParserImpl
-import com.metrolist.innertubex.extraction.strategy.PoTokenProviderKind
 import com.vyorasound.app.domain.model.PlaybackStream
-import com.vyorasound.app.network.PoTokenService
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import java.io.IOException
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.minutes
 
-/** InnerTubeX resolves direct audio URLs; Media3 remains the playback engine. */
-class InnerTubeXStreamResolver(
-    context: Context,
-    private val poTokenService: PoTokenService,
-) : AudioStreamResolver {
-    private val appContext = context.applicationContext
-    private val initMutex = Mutex()
+object InnerTubeXStreamResolver {
     @Volatile private var runtime: Runtime? = null
-    private val logger = InnerTubeLogger { _ -> }
 
-    override suspend fun resolve(videoId: String, visitorData: String): PlaybackStream =
-        withContext(Dispatchers.IO) {
-            require(videoId.isNotBlank()) { "Missing YouTube video ID" }
-            require(visitorData.isNotBlank()) { "Missing YouTube visitor data" }
+    @Synchronized
+    fun initialize() {
+        if (runtime != null) return
+        val httpClient = HttpClient(OkHttp) { expectSuccess = false }
+        val innerTube = InnerTube(httpClient)
+        val configStore = RemotePlayerConfigStore(httpClient, PlayerConfigRepository.disabled())
+        val cipherService = YouTubeCipherService(httpClient, configStore)
+        val parser = YtConfigParserImpl(
+            httpClient = httpClient,
+            innerTube = innerTube,
+            remotePlayerConfigStore = configStore,
+            cipherService = cipherService
+        )
+        val extractor = InnerTubeExtractor(
+            configParser = parser,
+            cipherService = cipherService,
+            innerTube = innerTube
+        )
+        runtime = Runtime(httpClient, innerTube, cipherService, extractor)
+    }
 
-            val stream = requireNotNull(getRuntime().extractor.extract(
-                videoId = videoId,
-                hints = ContentHints(wantVideo = false),
-                audioQuality = AudioQuality.HIGH,
-            )) { "InnerTubeX returned no playable audio stream" }
-
-            // The current Media3 adapter consumes direct URLs, not SABR segments.
-            if (stream.sabrBootstrap != null) {
-                throw IOException("InnerTubeX selected SABR; this Media3 adapter requires a direct stream")
-            }
-            val url = stream.audioUrl.takeIf { it.startsWith("https://") }
-                ?: throw IOException("InnerTubeX returned no valid HTTPS audio URL")
-            val mime = stream.mimeType.orEmpty().ifBlank { "application/octet-stream" }
-            val headers = stream.headers
-            val userAgent = headers.entries.firstOrNull {
-                it.key.equals("User-Agent", ignoreCase = true)
-            }?.value?.takeIf { it.isNotBlank() }
-                ?: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/134.0.0.0 Mobile Safari/537.36"
-
-            PlaybackStream(
-                videoId = videoId,
-                streamUrl = url,
-                mimeType = mime,
-                bitrate = stream.bitrate ?: 0,
-                userAgent = userAgent,
-                expiresAtMs = stream.expiresAt?.toEpochMilliseconds()
-                    ?: (System.currentTimeMillis() + 300_000L),
-                isHls = mime.contains("mpegurl", ignoreCase = true) ||
-                    url.contains(".m3u8", ignoreCase = true),
-                itag = stream.itag,
-                codecs = stream.codecs,
-                audioQuality = "HIGH",
-                contentLength = stream.contentLengthBytes,
-                clientName = "innertubex-" + stream.clientName,
-                originHeader = headers.entries.firstOrNull {
-                    it.key.equals("Origin", ignoreCase = true)
-                }?.value,
-                httpHeaders = headers,
-            )
+    suspend fun resolve(videoId: String): PlaybackStream {
+        require(videoId.matches(Regex("[A-Za-z0-9_-]{11}"))) { "Invalid YouTube video ID" }
+        val active = runtime ?: synchronized(this) {
+            runtime ?: run { initialize(); checkNotNull(runtime) }
         }
+        val stream = active.extractor.extract(
+            videoId = videoId,
+            hints = ContentHints(wantVideo = false).withStreamCapabilities(
+                allowHls = false, allowSabr = false,
+                allowBoundedRange = false, allowProgressive = false
+            ),
+            audioQuality = AudioQuality.AUTO
+        ) ?: throw IOException("InnerTubeX returned no playable audio stream")
 
-    private suspend fun getRuntime(): Runtime {
-        runtime?.let { return it }
-        return initMutex.withLock {
-            runtime?.let { return@withLock it }
-
-            val http = HttpClient(OkHttp)
-            val innerTube = InnerTube(httpClient = http)
-            val configStore = RemotePlayerConfigStore(
-                httpClient = http,
-                repository = PlayerConfigRepository.disabled(),
-                logger = logger,
-            )
-            val cipher = YouTubeCipherService(http, configStore, logger)
-            val tokenProvider = object : TokenProvider {
-                override val capabilities = TokenProviderCapabilities(
-                    providers = setOf(PoTokenProviderKind.WEB_BOTGUARD),
-                    usesWebView = true,
-                )
-
-                override suspend fun getPoToken(
-                    videoId: String,
-                    visitorData: String,
-                    cookie: String?,
-                ): PoTokenResult? {
-                    // The two token fields have different bindings; never reuse one value.
-                    val playerToken = poTokenService.obtainPoToken(videoId) ?: return null
-                    val streamToken = poTokenService.obtainPoToken(visitorData) ?: return null
-                    return PoTokenResult(
-                        playerRequestToken = playerToken,
-                        streamingDataToken = streamToken,
-                        visitorData = visitorData,
-                    )
-                }
-
-                override suspend fun close() = Unit
-            }
-            val extractor = InnerTubeExtractor(
-                configParser = YtConfigParserImpl(http, innerTube, configStore, logger),
-                cipherService = cipher,
-                innerTube = innerTube,
-                tokenProvider = tokenProvider,
-                logger = logger,
-            )
-            Runtime(http, innerTube, extractor).also { runtime = it }
+        val parsed = runCatching { java.net.URI(stream.audioUrl) }.getOrNull()
+        if (parsed == null || parsed.scheme !in setOf("https", "http") || parsed.host.isNullOrBlank()) {
+            throw IOException("InnerTubeX returned an invalid audio URL")
         }
+        val userAgent = stream.headers.entries
+            .firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+            .orEmpty().ifBlank { "com.google.android.youtube/20.10.38 (Linux; U; Android 13)" }
+        val mime = if (stream.codecs.isNullOrBlank()) stream.mimeType.orEmpty()
+            else stream.mimeType.orEmpty() + "; codecs=\"" + stream.codecs + "\""
+        val expiry = stream.expiresAt?.toEpochMilliseconds()
+            ?: (Clock.System.now() + 5.minutes).toEpochMilliseconds()
+
+        return PlaybackStream(
+            videoId = videoId,
+            streamUrl = stream.audioUrl,
+            mimeType = mime,
+            bitrate = stream.bitrate ?: 0,
+            userAgent = userAgent,
+            expiresAtMs = expiry,
+            isHls = false,
+            itag = stream.itag,
+            codecs = stream.codecs,
+            contentLength = stream.contentLengthBytes,
+            clientName = "INNERTUBEX_" + stream.clientName,
+            requestHeaders = stream.headers
+        )
     }
 
     private data class Runtime(
-        val http: HttpClient,
+        val httpClient: HttpClient,
         val innerTube: InnerTube,
-        val extractor: InnerTubeExtractor,
+        val cipherService: YouTubeCipherService,
+        val extractor: InnerTubeExtractor
     )
 }

@@ -1,97 +1,96 @@
 #!/usr/bin/env python3
-"""Apply VYORA's InnerTubeX playback patch to the checked-in source archive."""
 from __future__ import annotations
 import argparse
-import re
 import shutil
 from pathlib import Path
 
-
-def find_project_root(path: Path) -> Path:
-    for build_file in [path / "app/build.gradle.kts", *path.rglob("app/build.gradle.kts")]:
-        root = build_file.parent.parent
-        if (root / "settings.gradle.kts").is_file():
-            return root
-    raise SystemExit("Could not locate app/build.gradle.kts and settings.gradle.kts")
-
-
 def replace_once(text: str, old: str, new: str, label: str) -> str:
-    if old not in text:
-        if new in text:
-            return text
-        raise SystemExit("Migration stopped: expected " + label + " anchor was not found")
+    if new in text: return text
+    if old not in text: raise SystemExit("Migration stopped: expected " + label + " anchor was not found")
     return text.replace(old, new, 1)
-
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", required=True, type=Path)
     parser.add_argument("--resolver-source", required=True, type=Path)
     args = parser.parse_args()
-    root = find_project_root(args.source_root.resolve())
+    root = args.source_root.resolve()
+    app = root / "app"
+    if not (app / "build.gradle.kts").is_file() or not (root / "settings.gradle.kts").is_file():
+        raise SystemExit("Migration stopped: VYORA Gradle project root was not found")
 
-    gradle_file = root / "app/build.gradle.kts"
-    gradle = gradle_file.read_text(encoding="utf-8")
-    gradle = re.sub(r'^\s*// Bundled yt-dlp[^\n]*\n', "", gradle, flags=re.M)
-    gradle = re.sub(
-        r'^\s*implementation\("io\.github\.junkfood02\.youtubedl-android:library:[^"]+"\)\s*\n',
-        "",
-        gradle,
-        flags=re.M,
-    )
-    if "com.github.MetrolistGroup.innertubex:innertubex:v0.13.0" not in gradle:
-        gradle = replace_once(
-            gradle,
-            "dependencies {\n",
-            'dependencies {\n  implementation("com.github.MetrolistGroup.innertubex:innertubex:v0.13.0")\n  implementation("io.ktor:ktor-client-okhttp:3.3.3")\n',
-            "app dependencies",
-        )
+    gradle_file = app / "build.gradle.kts"
+    gradle = replace_once(gradle_file.read_text(encoding="utf-8"), "dependencies {",
+        'dependencies {\n  implementation("com.github.MetrolistGroup.innertubex:innertubex:v0.13.0")\n  implementation("io.ktor:ktor-client-okhttp:3.6.0")',
+        "app dependencies block")
     gradle_file.write_text(gradle, encoding="utf-8")
 
     settings_file = root / "settings.gradle.kts"
-    settings = settings_file.read_text(encoding="utf-8")
-    if 'maven("https://jitpack.io")' not in settings:
-        settings = replace_once(
-            settings,
-            "    mavenCentral()\n",
-            '    mavenCentral()\n    maven("https://jitpack.io") {\n      content { includeGroup("com.github.MetrolistGroup.innertubex") }\n    }\n',
-            "dependency repositories",
-        )
+    settings = replace_once(settings_file.read_text(encoding="utf-8"),
+        "    mavenCentral()\n  }\n}\n\nrootProject.name",
+        '    mavenCentral()\n    maven("https://jitpack.io") {\n      content {\n        includeGroup("com.github.MetrolistGroup.innertubex")\n        includeGroup("com.github.MetrolistGroup.quackjs")\n      }\n    }\n  }\n}\n\nrootProject.name',
+        "dependency repository block")
     settings_file.write_text(settings, encoding="utf-8")
 
-    kotlin_files = list(root.rglob("*.kt"))
-    touched = []
-    for kotlin_file in kotlin_files:
-        source = kotlin_file.read_text(encoding="utf-8")
-        if "YtDlpStreamResolver" in source:
-            kotlin_file.write_text(source.replace("YtDlpStreamResolver", "InnerTubeXStreamResolver"), encoding="utf-8")
-            touched.append(str(kotlin_file.relative_to(root)))
+    package = app / "src/main/java/com/vyorasound/app"
+    repo_file = package / "repository/InnerTubeMusicRepository.kt"
+    model_file = package / "domain/model/MusicModels.kt"
+    app_file = package / "VyoraApplication.kt"
+    service_file = package / "service/PlaybackService.kt"
+    for path in (repo_file, model_file, app_file, service_file):
+        if not path.is_file(): raise SystemExit("Migration stopped: required source file missing: " + str(path.relative_to(root)))
 
-    if not touched:
-        print("No YtDlpStreamResolver symbol found. Kotlin source inventory:")
-        for kotlin_file in kotlin_files:
-            print("KOTLIN_FILE " + str(kotlin_file.relative_to(root)))
-            for number, line in enumerate(kotlin_file.read_text(encoding="utf-8").splitlines(), 1):
-                if re.search(r"yt.?dlp|youtube.?dl|stream.?resolv|playbackstream|audio.?resolver", line, re.I):
-                    print("MATCH " + str(kotlin_file.relative_to(root)) + ":" + str(number) + ": " + line.strip()[:240])
-        raise SystemExit("Migration stopped: source resolver architecture differs from expected VYORA snapshot")
+    resolver_dest = package / "repository/InnerTubeXStreamResolver.kt"
+    resolver_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(args.resolver_source, resolver_dest)
 
-    old_resolver = root / "app/src/main/java/com/vyorasound/app/repository/YtDlpStreamResolver.kt"
-    old_resolver.write_text(
-        """package com.vyorasound.app.repository
+    model = replace_once(model_file.read_text(encoding="utf-8"),
+        '    val clientName: String = "UNKNOWN"\n)',
+        '    val clientName: String = "UNKNOWN",\n    val requestHeaders: Map<String, String> = emptyMap()\n)',
+        "PlaybackStream model")
+    model_file.write_text(model, encoding="utf-8")
 
-fun interface AudioStreamResolver {
-    suspend fun resolve(videoId: String, visitorData: String): com.vyorasound.app.domain.model.PlaybackStream
-}
-""",
-        encoding="utf-8",
-    )
-    destination = root / "app/src/main/java/com/vyorasound/app/repository/InnerTubeXStreamResolver.kt"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(args.resolver_source, destination)
-    print("InnerTubeX migration applied to " + str(root))
-    print("Updated Kotlin references: " + ", ".join(touched))
+    repo = replace_once(repo_file.read_text(encoding="utf-8"),
+        '.header("User-Agent", stream.userAgent)\n                .get()',
+        '.apply { stream.requestHeaders.forEach { (name, value) -> header(name, value) } }\n                .header("User-Agent", stream.userAgent)\n                .get()',
+        "stream probe headers")
+    repo = replace_once(repo,
+        '            ensureVisitorData()\n            ensureNativeVisitorData()',
+        '''            // InnerTubeX is primary; existing InnerTube and public-relay paths remain fallbacks.
+            val innerTubeXStream = runCatching { InnerTubeXStreamResolver.resolve(videoId) }
+                .onFailure { error ->
+                    PlaybackDiagnostics.w("InnerTubeXResolveFailed | videoId=" + videoId + " | reason=" + (error.message ?: "unknown"))
+                }.getOrNull()
+            if (innerTubeXStream != null) {
+                val probe = streamProber.probe(innerTubeXStream)
+                PlaybackDiagnostics.i("InnerTubeXStreamProbe | videoId=" + videoId + " | client=" +
+                    innerTubeXStream.clientName + " | status=" + probe.httpStatus + " | playable=" + probe.isPlayable)
+                if (probe.isPlayable) {
+                    streamCache.put(videoId, innerTubeXStream)
+                    return@withContext Result.success(innerTubeXStream)
+                }
+            }
+            ensureVisitorData()
+            ensureNativeVisitorData()''',
+        "playback resolver insertion point")
+    repo_file.write_text(repo, encoding="utf-8")
 
+    application = replace_once(app_file.read_text(encoding="utf-8"),
+        "        super.onCreate()\n        container = AppContainer(this)",
+        "        super.onCreate()\n        InnerTubeXStreamResolver.initialize()\n        container = AppContainer(this)",
+        "application startup")
+    if "import com.vyorasound.app.repository.InnerTubeXStreamResolver" not in application:
+        application = application.replace(
+            "import com.vyorasound.app.repository.InnerTubeMusicRepository",
+            "import com.vyorasound.app.repository.InnerTubeMusicRepository\nimport com.vyorasound.app.repository.InnerTubeXStreamResolver")
+    app_file.write_text(application, encoding="utf-8")
+
+    service = replace_once(service_file.read_text(encoding="utf-8"),
+        '                        val headers = HashMap(dataSpec.httpRequestHeaders).apply {\n                            put("User-Agent", stream.userAgent)\n                        }',
+        '                        val headers = HashMap(dataSpec.httpRequestHeaders).apply {\n                            putAll(stream.requestHeaders)\n                            put("User-Agent", stream.userAgent)\n                        }',
+        "Media3 request headers")
+    service_file.write_text(service, encoding="utf-8")
+    print("InnerTubeX is now the primary VYORA playback resolver; legacy fallbacks are preserved.")
 
 if __name__ == "__main__":
     main()
