@@ -78,6 +78,10 @@ jobs:
           cp "$VYORA_PROJECT_ROOT/app/src/main/java/com/vyorasound/app/network/InnerTubeApiService.kt" "$SNAPSHOT/"
           cp "$VYORA_PROJECT_ROOT/app/src/main/java/com/vyorasound/app/network/NetworkModule.kt" "$SNAPSHOT/"
           cp "$VYORA_PROJECT_ROOT/app/src/main/java/com/vyorasound/app/domain/model/MusicModels.kt" "$SNAPSHOT/"
+          cp -R "$VYORA_PROJECT_ROOT/app/src/main/java" "$SNAPSHOT/all-main-java"
+          cp -R "$VYORA_PROJECT_ROOT/app/src/test" "$SNAPSHOT/all-tests" 2>/dev/null || true
+          cp -R "$VYORA_PROJECT_ROOT/gradle" "$SNAPSHOT/gradle"
+          cp "$VYORA_PROJECT_ROOT/gradle.properties" "$SNAPSHOT/" 2>/dev/null || true
           (cd "$SNAPSHOT" && zip -q -r "$RUNNER_TEMP/vyora-playback-source.zip" .)
 
       - name: Inspect latest source resolver layout
