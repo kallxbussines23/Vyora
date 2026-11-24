@@ -64,6 +64,25 @@ jobs:
           test -n "$PROJECT_ROOT"
           echo "VYORA_PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
+      - name: Inspect latest source resolver layout
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          root = Path(os.environ["VYORA_PROJECT_ROOT"])
+          out = Path(os.environ["RUNNER_TEMP"]) / "vyora-source-inspection.txt"
+          terms = re.compile(r"yt.?dlp|youtube.?dl|stream.?resolv|playbackstream|audio.?resolver|YoutubeDL", re.I)
+          with out.open("w", encoding="utf-8") as report:
+              report.write("PROJECT_ROOT " + str(root) + "\n")
+              for path in sorted(root.rglob("*.kt")):
+                  report.write("KOTLIN_FILE " + str(path.relative_to(root)) + "\n")
+                  for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                      if terms.search(line):
+                          report.write("MATCH " + str(path.relative_to(root)) + ":" + str(number) + ": " + line.strip()[:300] + "\n")
+          print(out.read_text(encoding="utf-8"))
+          PY
+
       - name: Apply InnerTubeX migration
         run: |
           python3 migration/innertubex/apply_migration.py \
@@ -81,3 +100,12 @@ jobs:
           path: ${{ env.VYORA_PROJECT_ROOT }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload source inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VYORA-source-inspection
+          path: ${{ runner.temp }}/vyora-source-inspection.txt
+          if-no-files-found: warn
+          retention-days: 3
